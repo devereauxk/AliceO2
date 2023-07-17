@@ -32,7 +32,7 @@
 #include "DataFormatsITSMFT/ROFRecord.h"
 
 #include <TH1F.h>
-#include <TH2F.h>
+#include <TH2D.h>
 #include <TFile.h>
 #include <TCanvas.h>
 #include <TF1.h>
@@ -70,7 +70,7 @@ class EfficiencyStudy : public Task
 
   // helper functions
   void loadROFrameData(gsl::span<const o2::itsmft::ROFRecord> rofs, gsl::span<const itsmft::CompClusterExt> clusters,
-                        gsl::span<const unsigned char>::iterator& pattIt);
+                        gsl::span<const unsigned char>::iterator& pattIt, deque<int> clusterInTrackIds);
   void printHistograms();
   void saveHistograms();
 
@@ -84,10 +84,13 @@ class EfficiencyStudy : public Task
   // internal
   const o2::itsmft::TopologyDictionary* dict;
   vector<o2::MCTrack> MCTracks;
+  gsl::span<const int> mInputITSidxs;
 
   // output
   static const int nlayers = 7;
-  TH2F* h2d_cluster_z_phi[nlayers] = {};
+  TH2D* h2d_cluster_z_phi[nlayers] = {};
+  TH2D* h2d_clusterInTrack_z_phi[nlayers] = {};
+  TH2D* h2d_clusterUsageEfficiency_z_phi[nlayers] = {};
 
   const string outFile{"o2standalone_efficiency_study.root"};
 };
@@ -107,16 +110,18 @@ void EfficiencyStudy::init(InitContext& ic)
   }
 
   // prepare output
-  int zbin = 25;
+  int zbin = 30;
   double z_length[nlayers] = {20, 20, 20, 60, 60, 80, 80};
-  int phibin = 25;
+  int phibin = 30;
   double phi_lo = 0;
   double phi_hi = TMath::Pi();
 
   for (int ilayer = 0; ilayer < nlayers; ilayer++)
   {
-    int z_bound = z_length[ilayer] / 2;
-    h2d_cluster_z_phi[ilayer] = new TH2F(Form("h2d_cluster_z_phi_%d", ilayer), Form("h2d_cluster_z_phi_%d", ilayer),
+    int z_bound = z_length[ilayer];
+    h2d_cluster_z_phi[ilayer] = new TH2D(Form("h2d_cluster_z_phi_%d", ilayer), Form("h2d_cluster_z_phi_%d", ilayer),
+                                        zbin, -z_length[ilayer], z_length[ilayer], phibin, phi_lo, phi_hi);
+    h2d_clusterInTrack_z_phi[ilayer] = new TH2D(Form("h2d_clusterInTrack_z_phi_%d", ilayer), Form("h2d_clusterInTrack_z_phi_%d", ilayer),
                                         zbin, -z_length[ilayer], z_length[ilayer], phibin, phi_lo, phi_hi);
   }
 
@@ -135,11 +140,11 @@ void EfficiencyStudy::process(o2::globaltracking::RecoContainer& recoData)
 {
   auto rofs = recoData.getITSClustersROFRecords();
   auto clusters = recoData.getITSClusters();
+  auto tracks = recoData.getITSTracks();
+  mInputITSidxs = recoData.getITSTracksClusterRefs();
 
   auto pattIt_span = recoData.getITSClustersPatterns();
   gsl::span<const unsigned char>::iterator pattIt = pattIt_span.begin();
-
-  auto tracks = recoData.getITSTracks();
 
   if (useMC) cout<<"USING MC"<<endl;
   else cout<<"NOT USING MC"<<endl;
@@ -148,20 +153,47 @@ void EfficiencyStudy::process(o2::globaltracking::RecoContainer& recoData)
   LOGP(info, "Found {} ITS clusters", clusters.size());
   LOGP(info, "Found {} ROFs.", recoData.getITSTracksROFRecords().size());
 
-  // fill 2d z-phi cluster distribution, INCLUSIVE all reco clusters
-  loadROFrameData(rofs, clusters, pattIt);
+  // get vector of global cluster ids which were used to reconstruct a track
+  deque<int> clusterInTrackIds;
+  for (auto& track : tracks)
+  {
+    for (int clusterId{track.getFirstClusterEntry()}; clusterId < track.getFirstClusterEntry() + track.getNClusters(); ++clusterId) {
+      int global_cluster_id = mInputITSidxs[clusterId];
+      clusterInTrackIds.push_back(global_cluster_id);
+
+      //cout<<"CLUSTER IN TRACK ID "<<global_cluster_id<<endl;
+    }
+  }
+
+  // fill 2d z-phi cluster distributions: 1) for all clusters, 2) for clusters in tracks
+  loadROFrameData(rofs, clusters, pattIt, clusterInTrackIds);
+
+  // calculate cluster usage efficiency
+  for (int ilayer = 0; ilayer < nlayers; ilayer++)
+  {
+    h2d_clusterUsageEfficiency_z_phi[ilayer] = (TH2D*) h2d_clusterInTrack_z_phi[ilayer]->Clone(Form("h2d_clusterUsageEfficiency_z_phi_%d", ilayer));
+    TH2D* baseline = (TH2D*) h2d_cluster_z_phi[ilayer]->Clone();
+    h2d_clusterUsageEfficiency_z_phi[ilayer]->Divide(baseline);
+  }
 
 }
 
 // adapted from AliceO2/Detectors/ITSMFT/ITS/tracking/src/TimeFrame.cxx
 void EfficiencyStudy::loadROFrameData(gsl::span<const o2::itsmft::ROFRecord> rofs,
                                gsl::span<const itsmft::CompClusterExt> clusters,
-                               gsl::span<const unsigned char>::iterator& pattIt)
+                               gsl::span<const unsigned char>::iterator& pattIt,
+                               deque<int> clusterInTrackIds)
 {
+  // make checking cluster ids faster
+  sort(clusterInTrackIds.begin(), clusterInTrackIds.end()); // sort increasing order
+
+  // load geometry
   o2::its::GeometryTGeo* geom = o2::its::GeometryTGeo::Instance();
   geom->fillMatrixCache(o2::math_utils::bit2Mask(o2::math_utils::TransformType::T2L, o2::math_utils::TransformType::L2G));
 
+  // loop over ROFs
   for (auto& rof : rofs) {
+    // loop over each cluster in ROF
     for (int clusterId{rof.getFirstEntry()}; clusterId < rof.getFirstEntry() + rof.getNEntries(); ++clusterId) {
       auto& c = clusters[clusterId];
 
@@ -186,13 +218,26 @@ void EfficiencyStudy::loadROFrameData(gsl::span<const o2::itsmft::ROFRecord> rof
       // Transformation to the local --> global
       auto gloXYZ = geom->getMatrixL2G(sensorID) * locXYZ;
 
-      // fill histograms
-      cout<<"CLUSTER ID "<<clusterId<<" layer "<<layer<<" z "<<gloXYZ.Z()<<" phi "<<gloXYZ.Phi()<<endl;
+      // fill inclusive histogram (all reconstructed clusters)
+      //cout<<"CLUSTER ID "<<clusterId<<" layer "<<layer<<" z "<<gloXYZ.Z()<<" phi "<<gloXYZ.Phi();
       h2d_cluster_z_phi[layer]->Fill(gloXYZ.Z(), gloXYZ.Phi());
+
+      // fill histogram for clusters that exist in tracks
+      // must first find if clusterId (a global id) matches any id for any cluster associated with a track
+      // can just consider first element since clusterInTrackIds is sorted
+      if (clusterId == clusterInTrackIds[0])
+      {
+        h2d_clusterInTrack_z_phi[layer]->Fill(gloXYZ.Z(), gloXYZ.Phi());
+        //cout<<" [USED IN TRACK]";
+        clusterInTrackIds.pop_front(); // important to remove after found!!!
+      }
+      // cout<<endl;
+
     }
 
   }
 }
+
 
 void EfficiencyStudy::printHistograms()
 {
@@ -226,15 +271,42 @@ void EfficiencyStudy::printHistograms()
     c->Print(Form("./h2d_cluster_z_phi_%d.pdf", ilayer));
   }
 
+  // cluster z-eta distributions, clusters in tracks
+  plot_zrange_lo = 0;
+  plot_zrange_hi = 250;
+
+  for (int ilayer = 0; ilayer < nlayers; ilayer++)
+  {
+    h2d_clusterInTrack_z_phi[ilayer]->GetXaxis()->SetTitle("z");
+    h2d_clusterInTrack_z_phi[ilayer]->GetYaxis()->SetTitle("#phi");
+    // h2d_clusterInTrack_z_phi->GetZaxis()->SetRangeUser(plot_zrange_lo, plot_zrange_hi);
+
+    h2d_clusterInTrack_z_phi[ilayer]->Draw("colz");
+    c->Print(Form("./h2d_clusterInTrack_z_phi_%d.pdf", ilayer));
+  }
+
+  // cluster usage efficiency z-eta distributions
+  // # clusters used in tracks / # total clusters
+  for (int ilayer = 0; ilayer < nlayers; ilayer++)
+  {
+    h2d_clusterUsageEfficiency_z_phi[ilayer]->GetXaxis()->SetTitle("z");
+    h2d_clusterUsageEfficiency_z_phi[ilayer]->GetYaxis()->SetTitle("#phi");
+
+    h2d_clusterUsageEfficiency_z_phi[ilayer]->Draw("colz");
+    c->Print(Form("./h2d_clusterUsageEfficiency_z_phi_%d.pdf", ilayer));
+  }
+
 }
 
 void EfficiencyStudy::saveHistograms()
 {
-  TFile* fout = new TFile(outFile.c_str(), "UPDATE");
+  TFile* fout = new TFile(outFile.c_str(), "recreate");
 
   for (int ilayer = 0; ilayer < nlayers; ilayer++)
   {
     h2d_cluster_z_phi[ilayer]->Write();
+    h2d_clusterInTrack_z_phi[ilayer]->Write();
+    h2d_clusterUsageEfficiency_z_phi[ilayer]->Write();
   }
 
   fout->Close();
