@@ -27,6 +27,9 @@
 #include "ReconstructionDataFormats/Track.h"
 #include "ReconstructionDataFormats/DCA.h"
 #include <Steer/MCKinematicsReader.h>
+#include <DataFormatsITSMFT/TopologyDictionary.h>
+#include "DetectorsBase/GRPGeomHelper.h"
+#include "DataFormatsITSMFT/ROFRecord.h"
 
 #include <TH1F.h>
 #include <TH2F.h>
@@ -48,50 +51,50 @@ namespace study
 {
 using namespace o2::framework;
 using namespace o2::globaltracking;
-using namespace o2::its;
 using namespace std;
-
-using GTrackID = o2::dataformats::GlobalTrackID;
-using MCLabel = o2::MCCompLabel;
 
 class EfficiencyStudy : public Task
 {
  public:
-  EfficiencyStudy(shared_ptr<DataRequest> dr, mask_t src, bool mc) : mDataRequest(dr), mTracksSrc(src), useMC(mc) {};
+  EfficiencyStudy(shared_ptr<DataRequest> dr, shared_ptr<o2::base::GRPGeomRequest> gr, bool mc) : mDataRequest(dr), mGGCCDBRequest(gr), useMC(mc) {};
   ~EfficiencyStudy() final = default;
   void init(InitContext& ic) final;
   void run(ProcessingContext&) final;
   void endOfStream(EndOfStreamContext&) final;
   void finaliseCCDB(ConcreteDataMatcher&, void*) final;
   void process(o2::globaltracking::RecoContainer&);
+  void setClusterDictionary(const o2::itsmft::TopologyDictionary* d) { dict = d; }
 
  private:
   void updateTimeDependentParams(ProcessingContext& pc);
 
   // helper functions
+  void loadROFrameData(gsl::span<const o2::itsmft::ROFRecord> rofs, gsl::span<const itsmft::CompClusterExt> clusters,
+                        gsl::span<const unsigned char>::iterator& pattIt);
+  void printHistograms();
   void saveHistograms();
 
   // input
   shared_ptr<DataRequest> mDataRequest;
-  GTrackID::mask_t mTracksSrc{};
+  shared_ptr<o2::base::GRPGeomRequest> mGGCCDBRequest;
   bool useMC;
 
   unique_ptr<o2::steer::MCKinematicsReader> MCReader;
 
   // internal
+  const o2::itsmft::TopologyDictionary* dict;
   vector<o2::MCTrack> MCTracks;
 
   // output
-  TH2F* h2d_eta_phi_reco;
-  TH2F* h2d_eta_phi_truth;
-  TH2F* h2d_eta_err;
-  TH2F* h2d_phi_err;
+  static const int nlayers = 7;
+  TH2F* h2d_cluster_z_phi[nlayers] = {};
 
   const string outFile{"o2standalone_efficiency_study.root"};
 };
 
 void EfficiencyStudy::init(InitContext& ic)
 {
+  o2::base::GRPGeomHelper::instance().setRequest(mGGCCDBRequest);
   LOGP(info, "Starting track reconstruction efficiency study...");
 
   // read in MC truth tracks
@@ -104,17 +107,18 @@ void EfficiencyStudy::init(InitContext& ic)
   }
 
   // prepare output
-  int nEtabins = 50;
-  double eta_lo = -1.5;
-  double eta_hi = 1.5;
-  int nPhibins = 50;
+  int zbin = 25;
+  double z_length[nlayers] = {20, 20, 20, 60, 60, 80, 80};
+  int phibin = 25;
   double phi_lo = 0;
-  double phi_hi = 2*TMath::Pi();
+  double phi_hi = TMath::Pi();
 
-  h2d_eta_phi_reco = new TH2F("h2d_eta_phi_reco", "h2d_eta_phi_reco", eta_lo, eta_hi, nEtabins, phi_lo, phi_hi, nPhibins);
-  h2d_eta_phi_truth = new TH2F("h2d_eta_phi_truth", "h2d_eta_phi_truth", eta_lo, eta_hi, nEtabins, phi_lo, phi_hi, nPhibins);
-  h2d_eta_err = new TH2F("h2d_eta_err", "h2d_eta_err", eta_lo, eta_hi, nEtabins, eta_lo, eta_hi, nPhibins);
-  h2d_phi_err = new TH2F("h2d_phi_err", "h2d_phi_err", eta_lo, eta_hi, nEtabins, eta_lo, eta_hi, nPhibins);
+  for (int ilayer = 0; ilayer < nlayers; ilayer++)
+  {
+    int z_bound = z_length[ilayer] / 2;
+    h2d_cluster_z_phi[ilayer] = new TH2F(Form("h2d_cluster_z_phi_%d", ilayer), Form("h2d_cluster_z_phi_%d", ilayer),
+                                        zbin, -z_length[ilayer], z_length[ilayer], phibin, phi_lo, phi_hi);
+  }
 
   LOGP(info, "Efficiency study initialized.");
 }
@@ -129,75 +133,98 @@ void EfficiencyStudy::run(ProcessingContext& pc)
 
 void EfficiencyStudy::process(o2::globaltracking::RecoContainer& recoData)
 {
-  TDatabasePDG* pdg_db = TDatabasePDG::Instance();
+  auto rofs = recoData.getITSClustersROFRecords();
+  auto clusters = recoData.getITSClusters();
 
-  auto itsTracks = recoData.getITSTracks();
-  auto itsClusters = recoData.getITSClusters();
+  auto pattIt_span = recoData.getITSClustersPatterns();
+  gsl::span<const unsigned char>::iterator pattIt = pattIt_span.begin();
 
-  gsl::span<const MCLabel> mcLabels;
-
-  mcLabels = recoData.getITSTracksMCLabels();
-  MCLabel trackMCLabel;
+  auto tracks = recoData.getITSTracks();
 
   if (useMC) cout<<"USING MC"<<endl;
   else cout<<"NOT USING MC"<<endl;
 
-  LOGP(info, "Found {} ITS tracks", itsTracks.size());
-  LOGP(info, "Found {} ITS clusters", itsClusters.size());
-  LOGP(info, "Found {} labels", mcLabels.size());
+  LOGP(info, "Found {} ITS tracks", tracks.size());
+  LOGP(info, "Found {} ITS clusters", clusters.size());
+  LOGP(info, "Found {} ROFs.", recoData.getITSTracksROFRecords().size());
 
-  const o2::MCTrack* truth_track;
+  // fill 2d z-phi cluster distribution, INCLUSIVE all reco clusters
+  loadROFrameData(rofs, clusters, pattIt);
 
-  // comparing reco and MC tracks one-to-one phi values
-  TrackITS reco_track;
-  for (int i = 0; i < itsTracks.size(); i++)
-  {
-    reco_track = itsTracks[i];
+}
 
-    Double_t reco_eta = reco_track.getEta();
-    Double_t reco_phi = reco_track.getPhi();
+// adapted from AliceO2/Detectors/ITSMFT/ITS/tracking/src/TimeFrame.cxx
+void EfficiencyStudy::loadROFrameData(gsl::span<const o2::itsmft::ROFRecord> rofs,
+                               gsl::span<const itsmft::CompClusterExt> clusters,
+                               gsl::span<const unsigned char>::iterator& pattIt)
+{
+  o2::its::GeometryTGeo* geom = o2::its::GeometryTGeo::Instance();
+  geom->fillMatrixCache(o2::math_utils::bit2Mask(o2::math_utils::TransformType::T2L, o2::math_utils::TransformType::L2G));
 
-    h2d_eta_phi_reco->Fill(reco_eta, reco_phi);
+  for (auto& rof : rofs) {
+    for (int clusterId{rof.getFirstEntry()}; clusterId < rof.getFirstEntry() + rof.getNEntries(); ++clusterId) {
+      auto& c = clusters[clusterId];
 
-    trackMCLabel = mcLabels[i];
-    if (trackMCLabel.isValid())
-    {
-      truth_track = MCReader->getTrack(trackMCLabel);
+      int layer = geom->getLayer(c.getSensorID());
 
-      Double_t truth_eta = truth_track->GetEta();
-      Double_t truth_phi = truth_track->GetPhi();
-      h2d_eta_phi_truth->Fill(truth_eta, truth_phi);
+      auto pattID = c.getPatternID();
+      o2::math_utils::Point3D<float> locXYZ;
+      if (pattID != itsmft::CompCluster::InvalidPatternID) {
+        if (!dict->isGroup(pattID)) {
+          locXYZ = dict->getClusterCoordinates(c);
+        } else {
+          o2::itsmft::ClusterPattern patt(pattIt);
+          locXYZ = dict->getClusterCoordinates(c, patt);
+        }
+      } else {
+        o2::itsmft::ClusterPattern patt(pattIt);
+        locXYZ = dict->getClusterCoordinates(c, patt, false);
+      }
+      auto sensorID = c.getSensorID();
+      // Inverse transformation to the local --> tracking
+      auto trkXYZ = geom->getMatrixT2L(sensorID) ^ locXYZ;
+      // Transformation to the local --> global
+      auto gloXYZ = geom->getMatrixL2G(sensorID) * locXYZ;
 
-      Double_t eta_err = (reco_eta - truth_eta) / truth_eta;
-      Double_t phi_err = (reco_phi - truth_phi) / truth_phi;
-      h2d_eta_err->Fill(truth_eta, truth_phi, eta_err);
-      h2d_phi_err->Fill(truth_eta, truth_phi, phi_err);
-
-    }
-    cout<<endl;
-
-  }
-
-  // printing out all MC tracks (including those that don't pass reco)
-  /*
-  for (int i = 0; i < MCTracks.size(); i++)
-  {
-    mcTrack = (MCTrack*) &MCTracks[i];
-
-    int pdg_code = mcTrack->GetPdgCode();
-    Double_t charge = pdg_db->GetParticle(pdg_code)->Charge();
-
-    // if is charged final state particle and in eta, pt acceptance range of ITS
-    if (charge != 0
-          && abs(mcTrack->GetEta()) < 0.9
-          && mcTrack->GetPt() > 0.15)
-    {
-      cout<<"MC TRACK "<<i<<" with truth phi "<<mcTrack->GetPhi()<<endl;
+      // fill histograms
+      cout<<"CLUSTER ID "<<clusterId<<" layer "<<layer<<" z "<<gloXYZ.Z()<<" phi "<<gloXYZ.Phi()<<endl;
+      h2d_cluster_z_phi[layer]->Fill(gloXYZ.Z(), gloXYZ.Phi());
     }
 
   }
-  */
+}
 
+void EfficiencyStudy::printHistograms()
+{
+  // setup standard 2D hist canvas
+  TCanvas* c = new TCanvas("temp", "temp", 0, 0, 400, 400);
+  gStyle->SetOptStat(0); gStyle->SetOptTitle(0); gStyle->SetMarkerSize(1.6);
+  c->cd();
+  TPad* mpad = new TPad("temp","temp",0.02,0.02,0.99,0.99,0,0,0);
+  mpad->SetTickx();
+  mpad->SetTicky();
+  mpad->SetTopMargin(0.1);
+  mpad->SetBottomMargin(0.13);
+  mpad->SetLeftMargin(0.12);
+  mpad->SetRightMargin(0.15);
+  mpad->Draw();
+  mpad->cd();
+  c->Modified();
+  c->Update();
+
+  // cluster z-eta distributions, inclusive
+  Double_t plot_zrange_lo = 0;
+  Double_t plot_zrange_hi = 250;
+
+  for (int ilayer = 0; ilayer < nlayers; ilayer++)
+  {
+    h2d_cluster_z_phi[ilayer]->GetXaxis()->SetTitle("z");
+    h2d_cluster_z_phi[ilayer]->GetYaxis()->SetTitle("#phi");
+    // h2d_cluster_z_phi->GetZaxis()->SetRangeUser(plot_zrange_lo, plot_zrange_hi);
+
+    h2d_cluster_z_phi[ilayer]->Draw("colz");
+    c->Print(Form("./h2d_cluster_z_phi_%d.pdf", ilayer));
+  }
 
 }
 
@@ -205,7 +232,10 @@ void EfficiencyStudy::saveHistograms()
 {
   TFile* fout = new TFile(outFile.c_str(), "UPDATE");
 
-  h2d_eta_phi_reco->Write();
+  for (int ilayer = 0; ilayer < nlayers; ilayer++)
+  {
+    h2d_cluster_z_phi[ilayer]->Write();
+  }
 
   fout->Close();
   LOGP(important, "Stored histograms into {}", outFile.c_str());
@@ -213,19 +243,30 @@ void EfficiencyStudy::saveHistograms()
 
 void EfficiencyStudy::updateTimeDependentParams(ProcessingContext& pc)
 {
+  o2::base::GRPGeomHelper::instance().checkUpdates(pc);
   static bool initOnceDone = false;
   if (!initOnceDone) { // this params need to be queried only once
     initOnceDone = true;
+    o2::its::GeometryTGeo* geom = o2::its::GeometryTGeo::Instance();
+    geom->fillMatrixCache(o2::math_utils::bit2Mask(o2::math_utils::TransformType::T2L, o2::math_utils::TransformType::T2GRot, o2::math_utils::TransformType::T2G));
   }
 }
 
 void EfficiencyStudy::endOfStream(EndOfStreamContext& ec)
 {
+  printHistograms();
   saveHistograms();
 }
 
 void EfficiencyStudy::finaliseCCDB(ConcreteDataMatcher& matcher, void* obj)
 {
+  if (o2::base::GRPGeomHelper::instance().finaliseCCDB(matcher, obj)) {
+    return;
+  }
+  if (matcher == ConcreteDataMatcher("ITS", "CLUSDICT", 0)) {
+    setClusterDictionary((const o2::itsmft::TopologyDictionary*)obj);
+    return;
+  }
 }
 
 DataProcessorSpec getEfficiencyStudy(mask_t srcTracksMask, mask_t srcClustersMask, bool useMC)
@@ -236,11 +277,20 @@ DataProcessorSpec getEfficiencyStudy(mask_t srcTracksMask, mask_t srcClustersMas
   dataRequest->requestClusters(srcClustersMask, useMC);
   // dataRequest->requestPrimaryVertertices(useMC);
 
+  auto ggRequest = std::make_shared<o2::base::GRPGeomRequest>(false,                             // orbitResetTime
+                                                              true,                              // GRPECS=true
+                                                              false,                             // GRPLHCIF
+                                                              false,                             // GRPMagField
+                                                              false,                             // askMatLUT
+                                                              o2::base::GRPGeomRequest::Aligned, // geometry
+                                                              dataRequest->inputs,
+                                                              true);
+
   return DataProcessorSpec{
     "its-study-Efficiency",
     dataRequest->inputs,
     outputs,
-    AlgorithmSpec{adaptFromTask<EfficiencyStudy>(dataRequest, srcTracksMask, useMC)},
+    AlgorithmSpec{adaptFromTask<EfficiencyStudy>(dataRequest, ggRequest, useMC)},
     Options{}};
 }
 } // namespace study
