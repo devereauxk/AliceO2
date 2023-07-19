@@ -90,6 +90,7 @@ class EfficiencyStudy : public Task
   static const int nlayers = 7;
   TH2D* h2d_cluster_z_phi[nlayers] = {};
   TH2D* h2d_clusterInTrack_z_phi[nlayers] = {};
+  TH2D* h2d_clusterNotInTrack_z_phi[nlayers] = {};
   TH2D* h2d_clusterUsageEfficiency_z_phi[nlayers] = {};
 
   const string outFile{"o2standalone_efficiency_study.root"};
@@ -171,9 +172,14 @@ void EfficiencyStudy::process(o2::globaltracking::RecoContainer& recoData)
   // calculate cluster usage efficiency
   for (int ilayer = 0; ilayer < nlayers; ilayer++)
   {
+    // fill used cluster ratio
     h2d_clusterUsageEfficiency_z_phi[ilayer] = (TH2D*) h2d_clusterInTrack_z_phi[ilayer]->Clone(Form("h2d_clusterUsageEfficiency_z_phi_%d", ilayer));
     TH2D* baseline = (TH2D*) h2d_cluster_z_phi[ilayer]->Clone();
     h2d_clusterUsageEfficiency_z_phi[ilayer]->Divide(baseline);
+
+    // fill number of clusters unused in tracks histogram
+    h2d_clusterNotInTrack_z_phi[ilayer] = (TH2D*) h2d_cluster_z_phi[ilayer]->Clone(Form("h2d_clusterNotInTrack_z_phi_%d", ilayer));
+    h2d_clusterNotInTrack_z_phi[ilayer]->Add(h2d_clusterInTrack_z_phi[ilayer], -1);
   }
 
 }
@@ -259,13 +265,13 @@ void EfficiencyStudy::printHistograms()
 
   // cluster z-eta distributions, inclusive
   Double_t plot_zrange_lo = 0;
-  Double_t plot_zrange_hi = 250;
+  Double_t plot_zrange_hi = 1.1 * h2d_cluster_z_phi[nlayers-1]->GetMaximum();
 
   for (int ilayer = 0; ilayer < nlayers; ilayer++)
   {
     h2d_cluster_z_phi[ilayer]->GetXaxis()->SetTitle("z");
     h2d_cluster_z_phi[ilayer]->GetYaxis()->SetTitle("#phi");
-    // h2d_cluster_z_phi->GetZaxis()->SetRangeUser(plot_zrange_lo, plot_zrange_hi);
+    h2d_cluster_z_phi[ilayer]->GetZaxis()->SetRangeUser(plot_zrange_lo, plot_zrange_hi);
 
     h2d_cluster_z_phi[ilayer]->Draw("colz");
     c->Print(Form("./h2d_cluster_z_phi_%d.pdf", ilayer));
@@ -273,13 +279,12 @@ void EfficiencyStudy::printHistograms()
 
   // cluster z-eta distributions, clusters in tracks
   plot_zrange_lo = 0;
-  plot_zrange_hi = 250;
-
+  plot_zrange_hi = 1.1 * h2d_clusterInTrack_z_phi[0]->GetMaximum();
   for (int ilayer = 0; ilayer < nlayers; ilayer++)
   {
     h2d_clusterInTrack_z_phi[ilayer]->GetXaxis()->SetTitle("z");
     h2d_clusterInTrack_z_phi[ilayer]->GetYaxis()->SetTitle("#phi");
-    // h2d_clusterInTrack_z_phi->GetZaxis()->SetRangeUser(plot_zrange_lo, plot_zrange_hi);
+    h2d_clusterInTrack_z_phi[ilayer]->GetZaxis()->SetRangeUser(plot_zrange_lo, plot_zrange_hi);
 
     h2d_clusterInTrack_z_phi[ilayer]->Draw("colz");
     c->Print(Form("./h2d_clusterInTrack_z_phi_%d.pdf", ilayer));
@@ -287,13 +292,29 @@ void EfficiencyStudy::printHistograms()
 
   // cluster usage efficiency z-eta distributions
   // # clusters used in tracks / # total clusters
+  Double_t ratio_plot_zrange_lo = 0;
+  Double_t ratio_plot_zrange_hi = 0.8;
   for (int ilayer = 0; ilayer < nlayers; ilayer++)
   {
     h2d_clusterUsageEfficiency_z_phi[ilayer]->GetXaxis()->SetTitle("z");
     h2d_clusterUsageEfficiency_z_phi[ilayer]->GetYaxis()->SetTitle("#phi");
+    h2d_clusterUsageEfficiency_z_phi[ilayer]->GetZaxis()->SetRangeUser(ratio_plot_zrange_lo, ratio_plot_zrange_hi);
 
     h2d_clusterUsageEfficiency_z_phi[ilayer]->Draw("colz");
     c->Print(Form("./h2d_clusterUsageEfficiency_z_phi_%d.pdf", ilayer));
+  }
+
+  // number of clusters unused in tracks
+  plot_zrange_lo = 0;
+  plot_zrange_hi = 1.1 * h2d_clusterNotInTrack_z_phi[nlayers-1]->GetMaximum();
+  for (int ilayer = 0; ilayer < nlayers; ilayer++)
+  {
+    h2d_clusterNotInTrack_z_phi[ilayer]->GetXaxis()->SetTitle("z");
+    h2d_clusterNotInTrack_z_phi[ilayer]->GetYaxis()->SetTitle("#phi");
+    h2d_clusterNotInTrack_z_phi[ilayer]->GetZaxis()->SetRangeUser(plot_zrange_lo, plot_zrange_hi);
+
+    h2d_clusterNotInTrack_z_phi[ilayer]->Draw("colz");
+    c->Print(Form("./h2d_clusterNotInTrack_z_phi_%d.pdf", ilayer));
   }
 
 }
@@ -306,6 +327,7 @@ void EfficiencyStudy::saveHistograms()
   {
     h2d_cluster_z_phi[ilayer]->Write();
     h2d_clusterInTrack_z_phi[ilayer]->Write();
+    h2d_clusterNotInTrack_z_phi[ilayer]->Write();
     h2d_clusterUsageEfficiency_z_phi[ilayer]->Write();
   }
 
