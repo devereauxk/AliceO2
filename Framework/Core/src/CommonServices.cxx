@@ -213,9 +213,7 @@ o2::framework::ServiceSpec CommonServices::datatakingContextSpec()
         context.detectors = extDetectors;
       }
       auto forcedRaw = services.get<RawDeviceService>().device()->fConfig->GetProperty<std::string>("force_run_as_raw", "false");
-      context.forcedRaw = forcedRaw == "true";
-
-      context.nOrbitsPerTF = services.get<RawDeviceService>().device()->fConfig->GetProperty<uint64_t>("Norbits_per_TF", 128); },
+      context.forcedRaw = forcedRaw == "true"; },
     .kind = ServiceKind::Stream};
 }
 
@@ -646,14 +644,16 @@ auto flushStates(ServiceRegistryRef registry, DataProcessingStates& states) -> v
   });
 }
 
+O2_DECLARE_DYNAMIC_LOG(monitoring_service);
+
 /// This will flush metrics only once every second.
 auto flushMetrics(ServiceRegistryRef registry, DataProcessingStats& stats) -> void
 {
-  ZoneScopedN("flush metrics");
+  O2_SIGNPOST_ID_GENERATE(sid, monitoring_service);
+  O2_SIGNPOST_START(monitoring_service, sid, "flush", "flushing metrics");
   auto& monitoring = registry.get<Monitoring>();
   auto& relayer = registry.get<DataRelayer>();
 
-  O2_SIGNPOST_START(MonitoringStatus::ID, MonitoringStatus::FLUSH, 0, 0, O2_SIGNPOST_RED);
   // Send all the relevant metrics for the relayer to update the GUI
   stats.flushChangedMetrics([&monitoring](DataProcessingStats::MetricSpec const& spec, int64_t timestamp, int64_t value) mutable -> void {
     // convert timestamp to a time_point
@@ -683,7 +683,7 @@ auto flushMetrics(ServiceRegistryRef registry, DataProcessingStats& stats) -> vo
   });
   relayer.sendContextState();
   monitoring.flushBuffer();
-  O2_SIGNPOST_END(MonitoringStatus::ID, MonitoringStatus::FLUSH, 0, 0, O2_SIGNPOST_RED);
+  O2_SIGNPOST_END(monitoring_service, sid, "flush", "done flushing metrics");
 };
 } // namespace
 
@@ -707,6 +707,17 @@ o2::framework::ServiceSpec CommonServices::dataProcessingStats()
       using MetricSpec = DataProcessingStats::MetricSpec;
       using Kind = DataProcessingStats::Kind;
       using Scope = DataProcessingStats::Scope;
+
+#ifdef NDEBUG
+      bool enableDebugMetrics = false;
+#else
+      bool enableDebugMetrics = true;
+#endif
+      bool arrowAndResourceLimitingMetrics = false;
+      DeploymentMode deploymentMode = DefaultsHelpers::deploymentMode();
+      if (deploymentMode != DeploymentMode::OnlineDDS && deploymentMode != DeploymentMode::OnlineECS && deploymentMode != DeploymentMode::OnlineAUX && deploymentMode != DeploymentMode::FST) {
+        arrowAndResourceLimitingMetrics = true;
+      }
 
       std::vector<DataProcessingStats::MetricSpec> metrics = {
         MetricSpec{.name = "errors",
@@ -825,48 +836,55 @@ o2::framework::ServiceSpec CommonServices::dataProcessingStats()
         MetricSpec{.name = "dropped_incoming_messages", .metricId = static_cast<short>(ProcessingStatsId::DROPPED_INCOMING_MESSAGES), .kind = Kind::UInt64, .minPublishInterval = quickUpdateInterval},
         MetricSpec{.name = "relayed_messages", .metricId = static_cast<short>(ProcessingStatsId::RELAYED_MESSAGES), .kind = Kind::UInt64, .minPublishInterval = quickUpdateInterval},
         MetricSpec{.name = "arrow-bytes-destroyed",
+                   .enabled = arrowAndResourceLimitingMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::ARROW_BYTES_DESTROYED),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
                    .minPublishInterval = 0,
-                   .maxRefreshLatency = 0,
+                   .maxRefreshLatency = 10000,
                    .sendInitialValue = true},
         MetricSpec{.name = "arrow-messages-destroyed",
+                   .enabled = arrowAndResourceLimitingMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::ARROW_MESSAGES_DESTROYED),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
                    .minPublishInterval = 0,
-                   .maxRefreshLatency = 0,
+                   .maxRefreshLatency = 10000,
                    .sendInitialValue = true},
         MetricSpec{.name = "arrow-bytes-created",
+                   .enabled = arrowAndResourceLimitingMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::ARROW_BYTES_CREATED),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
                    .minPublishInterval = 0,
-                   .maxRefreshLatency = 0,
+                   .maxRefreshLatency = 10000,
                    .sendInitialValue = true},
         MetricSpec{.name = "arrow-messages-created",
+                   .enabled = arrowAndResourceLimitingMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::ARROW_MESSAGES_CREATED),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
                    .minPublishInterval = 0,
-                   .maxRefreshLatency = 0,
+                   .maxRefreshLatency = 10000,
                    .sendInitialValue = true},
         MetricSpec{.name = "arrow-bytes-expired",
+                   .enabled = arrowAndResourceLimitingMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::ARROW_BYTES_EXPIRED),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
                    .minPublishInterval = 0,
-                   .maxRefreshLatency = 0,
+                   .maxRefreshLatency = 10000,
                    .sendInitialValue = true},
         MetricSpec{.name = "shm-offer-bytes-consumed",
+                   .enabled = arrowAndResourceLimitingMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::SHM_OFFER_BYTES_CONSUMED),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
                    .minPublishInterval = 0,
-                   .maxRefreshLatency = 0,
+                   .maxRefreshLatency = 10000,
                    .sendInitialValue = true},
         MetricSpec{.name = "resources-missing",
+                   .enabled = enableDebugMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::RESOURCES_MISSING),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
@@ -874,6 +892,7 @@ o2::framework::ServiceSpec CommonServices::dataProcessingStats()
                    .maxRefreshLatency = 1000,
                    .sendInitialValue = true},
         MetricSpec{.name = "resources-insufficient",
+                   .enabled = enableDebugMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::RESOURCES_INSUFFICIENT),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
@@ -881,6 +900,7 @@ o2::framework::ServiceSpec CommonServices::dataProcessingStats()
                    .maxRefreshLatency = 1000,
                    .sendInitialValue = true},
         MetricSpec{.name = "resources-satisfactory",
+                   .enabled = enableDebugMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::RESOURCES_SATISFACTORY),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
@@ -888,11 +908,12 @@ o2::framework::ServiceSpec CommonServices::dataProcessingStats()
                    .maxRefreshLatency = 1000,
                    .sendInitialValue = true},
         MetricSpec{.name = "resource-offer-expired",
+                   .enabled = arrowAndResourceLimitingMetrics,
                    .metricId = static_cast<short>(ProcessingStatsId::RESOURCE_OFFER_EXPIRED),
                    .kind = Kind::UInt64,
                    .scope = Scope::DPL,
                    .minPublishInterval = 0,
-                   .maxRefreshLatency = 0,
+                   .maxRefreshLatency = 10000,
                    .sendInitialValue = true}};
 
       for (auto& metric : metrics) {
@@ -1072,15 +1093,18 @@ std::vector<ServiceSpec> CommonServices::defaultServices(std::string extraPlugin
     CommonMessageBackends::fairMQDeviceProxy(),
     dataSender(),
     objectCache(),
-    ccdbSupportSpec(),
-    ArrowSupport::arrowBackendSpec(),
-    CommonMessageBackends::fairMQBackendSpec(),
-    CommonMessageBackends::stringBackendSpec(),
-    decongestionSpec()};
+    ccdbSupportSpec()};
+
+  DeploymentMode deploymentMode = DefaultsHelpers::deploymentMode();
+  if (deploymentMode != DeploymentMode::OnlineDDS && deploymentMode != DeploymentMode::OnlineECS && deploymentMode != DeploymentMode::OnlineAUX && deploymentMode != DeploymentMode::FST) {
+    specs.push_back(ArrowSupport::arrowBackendSpec());
+  }
+  specs.push_back(CommonMessageBackends::fairMQBackendSpec());
+  specs.push_back(CommonMessageBackends::stringBackendSpec());
+  specs.push_back(decongestionSpec());
 
   std::string loadableServicesStr = extraPlugins;
   // Do not load InfoLogger by default if we are not at P2.
-  DeploymentMode deploymentMode = DefaultsHelpers::deploymentMode();
   if (deploymentMode == DeploymentMode::OnlineDDS || deploymentMode == DeploymentMode::OnlineECS || deploymentMode == DeploymentMode::OnlineAUX) {
     if (loadableServicesStr.empty() == false) {
       loadableServicesStr += ",";

@@ -111,10 +111,10 @@ void EfficiencyStudy::init(InitContext& ic)
   }
 
   // prepare output
-  int zbin = 30;
+  int zbin = 50;
   double z_length[nlayers] = {20, 20, 20, 60, 60, 80, 80};
-  int phibin = 30;
-  double phi_lo = 0;
+  int phibin = 50;
+  double phi_lo = -TMath::Pi();
   double phi_hi = TMath::Pi();
 
   for (int ilayer = 0; ilayer < nlayers; ilayer++)
