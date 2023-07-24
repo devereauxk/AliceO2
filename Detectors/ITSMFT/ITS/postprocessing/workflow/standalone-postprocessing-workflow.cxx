@@ -17,6 +17,7 @@
 #include "ITSStudies/ImpactParameter.h"
 #include "ITSStudies/AvgClusSize.h"
 #include "ITSStudies/TrackCheck.h"
+#include "ITSStudies/Efficiency.h"
 #include "Steer/MCKinematicsReader.h"
 
 using namespace o2::framework;
@@ -40,6 +41,7 @@ void customize(std::vector<ConfigParamSpec>& workflowOptions)
     {"cluster-size-study", VariantType::Bool, false, {"Perform the average cluster size study"}},
     {"track-study", VariantType::Bool, false, {"Perform the track study"}},
     {"impact-parameter-study", VariantType::Bool, false, {"Perform the impact parameter study"}},
+    {"efficiency-study", VariantType::Bool, false, {"Perform the efficiency study"}},
     {"configKeyValues", VariantType::String, "", {"Semicolon separated key=value strings ..."}}};
   std::swap(workflowOptions, options);
 }
@@ -59,25 +61,14 @@ WorkflowSpec defineDataProcessing(ConfigContext const& configcontext)
   srcTrc |= GID::getSourcesMask("ITS"); // guarantee that we will at least use ITS tracks
   GID::mask_t srcCls = allowedSourcesClus & GID::getSourcesMask(configcontext.options().get<std::string>("cluster-sources"));
 
-<<<<<<< HEAD
-  o2::globaltracking::InputHelper::addInputSpecs(configcontext, specs, srcCls, srcTrc, srcTrc, useMC);
+  o2::globaltracking::InputHelper::addInputSpecs(configcontext, specs, srcCls, srcTrc, srcTrc, useMC, srcCls, srcTrc);
   //o2::globaltracking::InputHelper::addInputSpecsPVertex(configcontext, specs, useMC);
   //o2::globaltracking::InputHelper::addInputSpecsSVertex(configcontext, specs);
-
-  // Declare specs related to studies hereafter
-  //specs.emplace_back(o2::its::study::getImpactParameterStudy(srcTrc, srcCls, useMC));
-  //specs.emplace_back(o2::its::study::getK0sInvMassStudy(srcTrc, useMC));
-  specs.emplace_back(o2::its::study::getEfficiencyStudy(srcTrc, srcCls, useMC));
-=======
-  o2::globaltracking::InputHelper::addInputSpecs(configcontext, specs, srcCls, srcTrc, srcTrc, useMC, srcCls, srcTrc);
-  o2::globaltracking::InputHelper::addInputSpecsPVertex(configcontext, specs, useMC);
-  o2::globaltracking::InputHelper::addInputSpecsSVertex(configcontext, specs);
 
   std::shared_ptr<o2::steer::MCKinematicsReader> mcKinematicsReader;
   if (useMC) {
     mcKinematicsReader = std::make_shared<o2::steer::MCKinematicsReader>("collisioncontext.root");
   }
->>>>>>> upstream/dev
 
   bool anyStudy{false};
   // Declare specs related to studies hereafter
@@ -92,6 +83,10 @@ WorkflowSpec defineDataProcessing(ConfigContext const& configcontext)
   if (configcontext.options().get<bool>("track-study")) {
     anyStudy = true;
     specs.emplace_back(o2::its::study::getTrackCheckStudy(GID::getSourcesMask("ITS"), GID::getSourcesMask("ITS"), useMC, mcKinematicsReader));
+  }
+  if (configcontext.options().get<bool>("efficiency-study")) {
+    anyStudy = true;
+    specs.emplace_back(o2::its::study::getEfficiencyStudy(srcTrc, srcCls, useMC));
   }
   if (!anyStudy) {
     LOGP(info, "No study selected, dryrunning");

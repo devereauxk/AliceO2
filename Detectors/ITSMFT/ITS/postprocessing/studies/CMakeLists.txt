@@ -15,6 +15,7 @@ o2_add_library(ITSPostprocessing
                        src/ITSStudiesConfigParam.cxx
                        src/TrackCheck.cxx
                        src/ITSStudiesConfigParam.cxx
+                       src/Efficiency.cxx
                PUBLIC_LINK_LIBRARIES O2::GlobalTracking
                                      O2::GlobalTrackingWorkflowReaders
                                      O2::GlobalTrackingWorkflowHelpers
